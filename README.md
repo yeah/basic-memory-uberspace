@@ -14,13 +14,13 @@ doubles as the WebDAV username, and one password covers both the OAuth login and
 WebDAV Basic Auth.
 
 ```
-                          ┌────────────────────────────────────┐
- Claude / ChatGPT ─OAuth─▶│                                         │──▶ Basic Memory (8000)
+                          ┌─────────────────────────────────────────┐
+Claude / ChatGPT ─OAuth──▶│                                         │──▶ Basic Memory (8000)
                           │   auth_gateway.py  (single entrypoint)   │
- Obsidian ────────Basic───▶│   /mcp  → OAuth  → proxy                 │──▶ WsgiDAV (8002)
+Obsidian ────────Basic───▶│   /mcp  → OAuth  → proxy                 │──▶ WsgiDAV (8002)
                           │   /dav  → Basic  → proxy                 │      → ~/basic-memory
                           │   /.well-known, /authorize, /token       │
-                          └────────────────────────────────────┘
+                          └─────────────────────────────────────────┘
 ```
 
 All three processes run as plain systemd user services. Basic Memory and WsgiDAV
@@ -58,24 +58,20 @@ to install for the Python toolchain.
 All commands run on your Uberspace shell unless noted otherwise. Replace
 `ubernaut` with your actual username everywhere.
 
-### 1. Install Basic Memory
-
-```bash
-uv tool install basic-memory
-basic-memory --version     # sanity check
-```
-
-Your notes live as Markdown files under `~/basic-memory` by default.
-
-### 2. Get this project
+### 1. Get this project
 
 ```bash
 git clone https://github.com/yeah/basic-memory-uberspace.git ~/auth_gateway
 cd ~/auth_gateway
-uv sync                    # installs all dependencies into .venv, writes uv.lock
+uv sync                    # installs everything (incl. Basic Memory) from uv.lock
 ```
 
-### 3. Create your configuration
+`uv sync` installs all dependencies — the gateway, WsgiDAV, **and Basic Memory
+itself** — at the exact versions pinned in `uv.lock`. Nothing else to install
+by hand. Your notes will live as Markdown files under `~/basic-memory` by
+default.
+
+### 2. Create your configuration
 
 ```bash
 cp .env.example .env
@@ -111,7 +107,7 @@ chmod 600 .env
 > without the `/mcp` suffix. If it is wrong, the OAuth discovery breaks for
 > browser clients.
 
-### 4. Point WsgiDAV at your notes
+### 3. Point WsgiDAV at your notes
 
 Edit `wsgidav.yaml` and set the `provider_mapping` to the absolute path of your
 notes (WsgiDAV does not expand `~`):
@@ -124,7 +120,7 @@ provider_mapping:
 Leave `simple_dc` on anonymous access — the gateway is the gatekeeper, WsgiDAV
 only ever listens on `127.0.0.1`.
 
-### 5. Create the three services
+### 4. Create the three services
 
 Uberspace 8 uses systemd user services. We run **three**, all started with
 `--workdir` so uv finds the project and the gateway finds `.env`.
@@ -133,7 +129,8 @@ Uberspace 8 uses systemd user services. We run **three**, all started with
 
 ```bash
 uberspace service add basicmemory \
-  "$HOME/.local/bin/basic-memory mcp --transport streamable-http --host 127.0.0.1 --port 8000"
+  "/usr/bin/uv run basic-memory mcp --transport streamable-http --host 127.0.0.1 --port 8000" \
+  --workdir "$HOME/auth_gateway"
 ```
 
 **WsgiDAV** — WebDAV server on `127.0.0.1:8002`:
@@ -169,7 +166,7 @@ If the gateway logs `ModuleNotFoundError` or `WARNING: ... is not set`, the
 working directory is wrong — verify `--workdir` points at the cloned repo and
 that `.env` exists there.
 
-### 6. Wire up the web backends
+### 5. Wire up the web backends
 
 Map only the specific gateway paths, so `/` stays free for other uses. The
 gateway forwards `/mcp` to Basic Memory and `/dav` to WsgiDAV after checking
