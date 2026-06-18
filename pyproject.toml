@@ -2,7 +2,7 @@
 name = "basic-memory-uberspace"
 version = "0.1.0"
 description = "Single-user OAuth 2.1 + WebDAV gateway that exposes a self-hosted Basic Memory MCP server and its notes to OAuth-capable AI clients (Claude, ChatGPT) and WebDAV clients (Obsidian) on Uberspace."
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "basic-memory>=0.18",
     "starlette>=0.40",
