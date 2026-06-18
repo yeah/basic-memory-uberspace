@@ -14,7 +14,7 @@ requests (including SSE streaming) to your local Basic Memory instance.
 
 ```
 Web client ── HTTPS ──> https://<user>.uber.space/mcp
-                              │  (Caddy → web backend)
+                              │
                               ▼
                         auth_gateway.py        ← OAuth 2.1 + PKCE, token check
                               │  127.0.0.1
@@ -50,7 +50,9 @@ Web client ── HTTPS ──> https://<user>.uber.space/mcp
 - An Uberspace 8 account (referred to as user `ubernaut` below — replace with
   your own username throughout)
 - SSH access to your Uberspace
-- `uv` and `basic-memory` (installed in the steps below)
+
+`uv` is already installed on Uberspace 8 (at `/usr/bin/uv`), so there is nothing
+to install for the Python toolchain.
 
 ---
 
@@ -59,17 +61,7 @@ Web client ── HTTPS ──> https://<user>.uber.space/mcp
 All commands run on your Uberspace shell unless noted otherwise. Replace
 `ubernaut` with your actual username everywhere.
 
-### 1. Install uv
-
-`uv` manages Python versions, virtual environments, and dependencies.
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source ~/.bashrc
-uv --version
-```
-
-### 2. Install and initialize Basic Memory
+### 1. Install and initialize Basic Memory
 
 ```bash
 uv tool install basic-memory
@@ -79,7 +71,7 @@ basic-memory --version     # sanity check
 
 Your notes live as Markdown files under `~/basic-memory` by default.
 
-### 3. Get this project
+### 2. Get this project
 
 ```bash
 git clone https://github.com/yeah/basic-memory-uberspace.git ~/auth_gateway
@@ -87,7 +79,7 @@ cd ~/auth_gateway
 uv sync                    # installs gateway dependencies into .venv, writes uv.lock
 ```
 
-### 4. Create your configuration
+### 3. Create your configuration
 
 ```bash
 cp .env.example .env
@@ -122,61 +114,58 @@ chmod 600 .env
 > without the `/mcp` suffix. If it is wrong, the OAuth discovery breaks for
 > browser clients.
 
-### 5. Create the two services
+### 4. Create the two services
 
-Uberspace 8 uses systemd user services. We run **two**: Basic Memory (local
-only) and the gateway (public).
+Uberspace 8 uses systemd user services. We run **two**: Basic Memory and the
+gateway.
 
-**Basic Memory** — bound to localhost, never exposed directly:
+**Basic Memory** — bound to `127.0.0.1`, reachable only by the gateway:
 
 ```bash
 uberspace service add basicmemory \
   "$HOME/.local/bin/basic-memory mcp --transport streamable-http --host 127.0.0.1 --port 8000"
 ```
 
-**The gateway** — runs via uv. First find your uv path:
+> Each Uberspace lives in its own network namespace with its own loopback
+> interface, so `127.0.0.1` here is private to your account — other users on the
+> same host cannot reach it. Binding Basic Memory to `127.0.0.1` keeps it
+> reachable only through the gateway. (The gateway itself must bind `0.0.0.0`,
+> see below, because that is what the web backend connects to.)
+
+**The gateway** — runs via uv, binds `0.0.0.0` (required for the web backend):
 
 ```bash
-which uv
+uberspace service add auth_gateway "/usr/bin/uv run python $HOME/auth_gateway/auth_gateway.py"
 ```
 
-Then create the service. Note Uberspace's `service add` may not pass a working
-directory or `.env` reliably through its command string, so we set the working
-directory directly in the unit file afterwards.
-
-```bash
-uberspace service add authgw "$(which uv) run python $HOME/auth_gateway/auth_gateway.py"
-```
-
-Now edit the unit to add the working directory (so uv finds `pyproject.toml`
+Then set the working directory in the unit file (so uv finds `pyproject.toml`
 and the gateway finds `.env`):
 
 ```bash
-nano ~/.config/systemd/user/authgw.service
+nano ~/.config/systemd/user/auth_gateway.service
 ```
 
-Make the `[Service]` section look like this (keep your real uv path in
-`ExecStart`):
+Make the `[Service]` section look like this:
 
 ```ini
 [Service]
 WorkingDirectory=/home/ubernaut/auth_gateway
-ExecStart=/home/ubernaut/.local/bin/uv run python auth_gateway.py
+ExecStart=/usr/bin/uv run python auth_gateway.py
 ```
 
 Reload and (re)start:
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user restart authgw
-systemctl --user status authgw --no-pager        # should be active (running)
-systemctl --user status basicmemory --no-pager   # should be active (running)
+systemctl --user restart auth_gateway
+systemctl --user status auth_gateway --no-pager   # should be active (running)
+systemctl --user status basicmemory --no-pager    # should be active (running)
 ```
 
 If the gateway logs `WARNING: ... is not set`, your `.env` is not being read —
 check `WorkingDirectory` and that `.env` exists in it.
 
-### 6. Wire up the web backend
+### 5. Wire up the web backend
 
 Route **all** traffic on `/` to the gateway. The gateway itself forwards `/mcp`
 to Basic Memory after checking the token. Do **not** add a separate `/mcp`
@@ -190,39 +179,6 @@ uberspace web backend list
 > On some Uberspace 8 versions the subcommand is `add` instead of `set`:
 > `uberspace web backend add / port 8001` (use `--force` if `/` already exists).
 > The list should show only `/ → 8001`.
-
-### 7. Verify the whole chain
-
-Discovery documents must show your real domain (not `127.0.0.1`):
-
-```bash
-curl -s https://ubernaut.uber.space/.well-known/oauth-protected-resource | python3 -m json.tool
-curl -s https://ubernaut.uber.space/.well-known/oauth-authorization-server | python3 -m json.tool
-```
-
-Unauthenticated request must be rejected:
-
-```bash
-curl -si https://ubernaut.uber.space/mcp -X POST | head -3   # expect HTTP/2 401
-```
-
-Authenticated request must reach Basic Memory. Issue a test token using your
-configured secrets, then call `initialize`:
-
-```bash
-cd ~/auth_gateway
-TOKEN=$(uv run python -c "from auth_gateway import _issue_access_token; print(_issue_access_token())")
-
-curl -si https://ubernaut.uber.space/mcp \
-  -X POST \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
-```
-
-Expected: `HTTP/2 200`, `content-type: text/event-stream`, and an
-`initialize` result containing `"serverInfo":{"name":"Basic Memory",...}`.
 
 ---
 
@@ -281,14 +237,16 @@ and let them run the OAuth flow, or supply a token issued by the gateway.
   tokens (e.g. in SQLite); not implemented here to keep the gateway minimal.
 - **Forcing a fresh OAuth flow** (e.g. for testing): change `JWT_SECRET` and
   restart, or remove and re-add the connector in the client.
-- **Logs:** `journalctl --user -u authgw -n 50 --no-pager`
+- **Logs:** `journalctl --user -u auth_gateway -n 50 --no-pager`
 
 ## Security notes
 
 - This is a **single-user** design. The `/authorize` page is protected by one
   password; there is no user management.
-- All traffic is HTTPS-terminated by Uberspace's Caddy. Basic Memory itself is
-  bound to `127.0.0.1` and is never reachable from the internet directly.
+- Basic Memory is bound to `127.0.0.1` inside your Uberspace's private network
+  namespace and is never reachable from the internet directly. All external
+  traffic goes through the gateway, which terminates over HTTPS via Uberspace's
+  web backend.
 - The gateway implements its own OAuth endpoints. Review the code before relying
   on it for anything beyond personal use.
 
