@@ -23,6 +23,7 @@ import os
 import secrets
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -63,14 +64,27 @@ JWT_SECRET = os.environ.get("JWT_SECRET", "")
 LOGIN_PASSWORD = os.environ.get("LOGIN_PASSWORD", "")
 
 # Exact-match allowlist of OAuth redirect URIs (comma-separated in .env).
-# The authorization code is only ever handed to a URI in this list, which
-# stops an attacker from driving the flow to their own callback. Empty means
-# nothing is allowed (fail closed); a rejected URI is logged so you can copy
-# the exact value your client uses into ALLOWED_REDIRECT_URIS.
+# The authorization code is only ever handed to a URI allowed here (or by
+# ALLOWED_REDIRECT_HOSTS below), which stops an attacker from driving the flow
+# to their own callback. If neither list allows the URI it is rejected (fail
+# closed) and logged, so you can copy the exact value your client uses.
 ALLOWED_REDIRECT_URIS = [
     _u.strip()
     for _u in os.environ.get("ALLOWED_REDIRECT_URIS", "").split(",")
     if _u.strip()
+]
+
+# Host-based allowlist (comma-separated in .env). A redirect URI is accepted if
+# it is an https URL whose host EXACTLY matches one of these. This covers
+# clients that generate a per-connector callback path on a fixed host, e.g.
+# ChatGPT's https://chatgpt.com/connector/oauth/<id>: pinning the host is the
+# real security boundary (that is where the code is delivered), while the path
+# may vary. Exact host match only (no subdomain wildcards), so a lookalike like
+# chatgpt.com.evil.com or chatgpt.com@evil.com is rejected.
+ALLOWED_REDIRECT_HOSTS = [
+    _h.strip().lower()
+    for _h in os.environ.get("ALLOWED_REDIRECT_HOSTS", "").split(",")
+    if _h.strip()
 ]
 
 # Upstream Basic Memory MCP server (local, no auth of its own).
@@ -113,16 +127,29 @@ def _esc(value: str) -> str:
 
 
 def _redirect_uri_ok(uri: str) -> bool:
-    """True if uri is in the configured allowlist (exact match).
+    """True if uri is allowed, by either:
 
-    Logs rejected values so the operator can discover the exact redirect_uri
-    their client uses and add it to ALLOWED_REDIRECT_URIS.
+    1. exact full-URI match against ALLOWED_REDIRECT_URIS, or
+    2. https URL whose host exactly matches an entry in ALLOWED_REDIRECT_HOSTS.
+
+    The URL is parsed (not string-prefixed) so lookalike hosts such as
+    chatgpt.com.evil.com or chatgpt.com@evil.com cannot pass the host check.
+    Rejected values are logged so the operator can discover the exact
+    redirect_uri (or host) their client uses and allow it.
     """
     if uri in ALLOWED_REDIRECT_URIS:
         return True
+    if ALLOWED_REDIRECT_HOSTS:
+        parts = urlsplit(uri)
+        if (
+            parts.scheme == "https"
+            and parts.hostname
+            and parts.hostname.lower() in ALLOWED_REDIRECT_HOSTS
+        ):
+            return True
     print(
-        "rejected redirect_uri (add to ALLOWED_REDIRECT_URIS if you trust it): "
-        + repr(uri)
+        "rejected redirect_uri (allow its host via ALLOWED_REDIRECT_HOSTS, or "
+        "the exact URI via ALLOWED_REDIRECT_URIS, if you trust it): " + repr(uri)
     )
     return False
 

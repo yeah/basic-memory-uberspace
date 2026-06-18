@@ -92,18 +92,28 @@ CLIENT_ID=basic-memory
 CLIENT_SECRET=<first openssl value>
 JWT_SECRET=<second openssl value>
 LOGIN_PASSWORD=<a password you choose>
-ALLOWED_REDIRECT_URIS=https://claude.ai/api/mcp/auth_callback
+ALLOWED_REDIRECT_HOSTS=claude.ai,chatgpt.com,callback.mistral.ai
 ```
 
 `LOGIN_PASSWORD` is used both for the OAuth browser login and as the WebDAV
 password. The WebDAV username defaults to `CLIENT_ID`.
 
-`ALLOWED_REDIRECT_URIS` is the exact-match allowlist of OAuth callback URLs the
-authorization code may be sent to. It is **required** — if empty, every
-`/authorize` is rejected. The value above is the Claude.ai connector callback;
-if your client uses a different one, the gateway logs the exact rejected
-`redirect_uri` (`journalctl --user -u auth_gateway`) so you can copy it in.
-Separate multiple URLs with commas.
+OAuth callbacks are restricted so the authorization code can only go to a
+client you trust. A redirect URI is allowed if **either** check passes:
+
+- `ALLOWED_REDIRECT_HOSTS` — comma-separated hosts; an `https` redirect URI
+  whose host matches exactly is accepted, whatever the path. This is the
+  practical option, because some clients mint a per-connector callback path on
+  a fixed host. Known hosts: Claude → `claude.ai`, ChatGPT → `chatgpt.com`
+  (path varies, e.g. `/connector/oauth/<id>`), Mistral → `callback.mistral.ai`.
+- `ALLOWED_REDIRECT_URIS` — comma-separated **exact** full-URI matches, to pin
+  one specific callback instead of trusting a whole host.
+
+At least one of the two must be set, or every `/authorize` is rejected. Host
+matching is an exact host comparison over `https` (no subdomain wildcards), so
+lookalikes like `chatgpt.com.evil.com` are rejected. A rejected `redirect_uri`
+is logged (`journalctl --user -u auth_gateway`) so you can see the exact value
+your client uses and allow its host or URI.
 
 The gateway also **refuses to start** if `CLIENT_SECRET`, `JWT_SECRET` or
 `LOGIN_PASSWORD` is empty, so a misconfigured deployment fails loudly instead
@@ -219,11 +229,25 @@ uberspace web backend list
 4. **Connect** → the login page opens in the browser → enter `LOGIN_PASSWORD`.
 5. Enable the connector in a chat and try: *"search my notes about …"*
 
+Claude's redirect URI is `https://claude.ai/api/mcp/auth_callback`, covered by
+the `claude.ai` entry in `ALLOWED_REDIRECT_HOSTS`.
+
 ### ChatGPT (Developer Mode)
 
 Settings → Apps & Connectors → Advanced → enable **Developer Mode**, then add a
 connector pointing at the same URL with the same client ID/secret. The gateway
 issues refresh tokens, so the flow completes.
+
+ChatGPT generates a per-connector redirect URI on `chatgpt.com` (for example
+`https://chatgpt.com/connector/oauth/<id>`), covered by the `chatgpt.com` entry
+in `ALLOWED_REDIRECT_HOSTS`.
+
+### Mistral (Le Chat)
+
+In Le Chat, open **Intelligence → Connectors** (you must be an admin), add a
+custom MCP connector pointing at the same `/mcp` URL, and complete the OAuth
+consent. Mistral's redirect URI is on `callback.mistral.ai`, covered by that
+entry in `ALLOWED_REDIRECT_HOSTS`.
 
 ### Obsidian (WebDAV sync, macOS + iOS)
 
@@ -262,7 +286,8 @@ while Basic Memory is actively writing it.
 | `CLIENT_SECRET`     | yes      | —                           | Fixed OAuth client secret. |
 | `JWT_SECRET`        | yes      | —                           | Signing key for access tokens. Keep stable. |
 | `LOGIN_PASSWORD`    | yes      | —                           | Password for both OAuth login and WebDAV Basic Auth. |
-| `ALLOWED_REDIRECT_URIS` | yes  | —                           | Comma-separated exact-match allowlist of OAuth redirect URIs. Empty rejects every `/authorize`. Rejected URIs are logged so you can copy the exact value your client uses. |
+| `ALLOWED_REDIRECT_HOSTS` | yes* | —                       | Comma-separated hosts; an `https` redirect URI whose host matches exactly is allowed (any path). *Either this or `ALLOWED_REDIRECT_URIS` must be set. |
+| `ALLOWED_REDIRECT_URIS` | yes* | —                           | Comma-separated **exact** full-URI allowlist of OAuth redirect URIs. *Either this or `ALLOWED_REDIRECT_HOSTS` must be set. Rejected URIs are logged. |
 | `WEBDAV_USERNAME`   | no       | value of `CLIENT_ID`        | Override the WebDAV username if you want it to differ from the OAuth client ID. |
 | `ACCESS_TOKEN_TTL`  | no       | `3600`                      | Access-token lifetime (seconds). |
 | `REFRESH_TOKEN_TTL` | no       | `2592000`                   | Refresh-token lifetime (seconds). |
