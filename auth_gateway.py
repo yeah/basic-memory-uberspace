@@ -1,14 +1,13 @@
 """
-auth_gateway.py - Minimal single-user OAuth 2.1 gateway in front of Basic Memory.
+auth_gateway.py - Single-user gateway in front of Basic Memory and WsgiDAV.
 
-STAGE 3 (final): Discovery + /authorize + /token (PKCE-S256) + token-verified
-reverse proxy to the local Basic Memory MCP server.
+One public entrypoint, two auth schemes by path:
+  /mcp  -> OAuth 2.1 + PKCE (Bearer JWT)  -> proxy to Basic Memory (MCP)
+  /dav  -> HTTP Basic Auth                -> proxy to WsgiDAV (WebDAV)
 
-Flow:
-    Web client -> https://<BASE_URL>/mcp  -> this gateway
-        - validates the Bearer JWT
-        - on success, transparently proxies to UPSTREAM_URL (Basic Memory)
-        - streams responses (SSE / chunked) back to the client
+Both share one set of credentials from .env: the OAuth client id doubles as the
+WebDAV username, and LOGIN_PASSWORD covers both the OAuth login and WebDAV Basic
+Auth. The upstreams have no auth of their own and bind 127.0.0.1 only.
 
 Required packages (on Uberspace):
     uv sync   # installs all dependencies from pyproject.toml
@@ -56,6 +55,15 @@ LOGIN_PASSWORD = os.environ.get("LOGIN_PASSWORD", "")
 
 # Upstream Basic Memory MCP server (local, no auth of its own).
 UPSTREAM_URL = os.environ.get("UPSTREAM_URL", "http://127.0.0.1:8000").rstrip("/")
+
+# Upstream WebDAV server (WsgiDAV, local, no auth of its own). Used for the
+# /dav path, which Obsidian and other WebDAV clients reach via Basic Auth.
+DAV_UPSTREAM_URL = os.environ.get("DAV_UPSTREAM_URL", "http://127.0.0.1:8002").rstrip("/")
+
+# WebDAV Basic Auth uses the same credentials as OAuth: the username equals
+# CLIENT_ID and the password equals LOGIN_PASSWORD, so everything is driven by
+# a single set of secrets in .env.
+WEBDAV_USERNAME = os.environ.get("WEBDAV_USERNAME", CLIENT_ID)
 
 ACCESS_TOKEN_TTL = int(os.environ.get("ACCESS_TOKEN_TTL", "3600"))          # 1 hour
 REFRESH_TOKEN_TTL = int(os.environ.get("REFRESH_TOKEN_TTL", str(60 * 60 * 24 * 30)))  # 30 days
@@ -120,7 +128,7 @@ def _verify_access_token(req_headers) -> bool:
         return False
 
 
-# --- Discovery (Stage 1) ------------------------------------------------------
+# --- Discovery ----------------------------------------------------------------
 
 async def protected_resource_metadata(request):
     return JSONResponse({
@@ -285,9 +293,9 @@ async def token(request):
     return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
 
 
-# --- Reverse proxy to Basic Memory (token-protected) --------------------------
+# --- Reverse proxy core (shared by both auth paths) ---------------------------
 
-def _401() -> Response:
+def _401_bearer() -> Response:
     www_auth = (
         f'Bearer realm="mcp", '
         f'resource_metadata="{BASE_URL}/.well-known/oauth-protected-resource"'
@@ -295,18 +303,40 @@ def _401() -> Response:
     return Response(status_code=401, headers={"WWW-Authenticate": www_auth})
 
 
-async def proxy(request):
-    # 1. Require a valid Bearer token.
-    if not _verify_access_token(request.headers):
-        return _401()
+def _401_basic() -> Response:
+    # Prompts WebDAV clients (Obsidian) to send Basic credentials.
+    return Response(
+        status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="webdav"'},
+    )
 
-    # 2. Build the upstream request, preserving path + query.
-    upstream_path = request.url.path  # e.g. /mcp
-    url = f"{UPSTREAM_URL}{upstream_path}"
+
+def _check_basic_auth(req_headers) -> bool:
+    """Validate Basic Auth against WEBDAV_USERNAME / LOGIN_PASSWORD."""
+    auth = req_headers.get("authorization", "")
+    if not auth.startswith("Basic "):
+        return False
+    try:
+        user, pw = base64.b64decode(auth[6:]).decode().split(":", 1)
+    except Exception:
+        return False
+    return secrets.compare_digest(user, WEBDAV_USERNAME) and secrets.compare_digest(
+        pw, LOGIN_PASSWORD
+    )
+
+
+async def _proxy_to(request, upstream_base: str) -> Response:
+    """Stream the request through to an upstream, preserving method/path/query.
+
+    Works for plain HTTP (MCP/SSE) as well as WebDAV verbs (PROPFIND, MKCOL,
+    COPY, MOVE, LOCK, ...), because the method is forwarded verbatim.
+    """
+    url = f"{upstream_base}{request.url.path}"
     if request.url.query:
         url += f"?{request.url.query}"
 
-    # Forward headers except hop-by-hop and the Authorization (upstream has no auth).
+    # Forward all headers except hop-by-hop and our own Authorization
+    # (the upstreams have no auth of their own).
     fwd_headers = {
         k: v for k, v in request.headers.items()
         if k.lower() not in _HOP_BY_HOP and k.lower() != "authorization"
@@ -314,7 +344,6 @@ async def proxy(request):
 
     body = await request.body()
 
-    # 3. Open a streaming request to upstream so SSE/chunked responses pass through.
     req = _client.build_request(
         request.method, url, headers=fwd_headers, content=body,
     )
@@ -331,6 +360,22 @@ async def proxy(request):
         headers=resp_headers,
         background=BackgroundTask(upstream.aclose),
     )
+
+
+# --- /mcp : OAuth-protected proxy to Basic Memory -----------------------------
+
+async def proxy_mcp(request):
+    if not _verify_access_token(request.headers):
+        return _401_bearer()
+    return await _proxy_to(request, UPSTREAM_URL)
+
+
+# --- /dav : Basic-Auth-protected proxy to WsgiDAV -----------------------------
+
+async def proxy_dav(request):
+    if not _check_basic_auth(request.headers):
+        return _401_basic()
+    return await _proxy_to(request, DAV_UPSTREAM_URL)
 
 
 # --- App lifecycle ------------------------------------------------------------
@@ -350,6 +395,12 @@ async def _lifespan(app):
             await _client.aclose()
 
 
+# All WebDAV methods Obsidian / clients may use, plus standard HTTP verbs.
+_DAV_METHODS = [
+    "GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS",
+    "PROPFIND", "PROPPATCH", "MKCOL", "COPY", "MOVE", "LOCK", "UNLOCK",
+]
+
 routes = [
     Route("/.well-known/oauth-protected-resource",
           protected_resource_metadata, methods=["GET"]),
@@ -357,8 +408,12 @@ routes = [
           authorization_server_metadata, methods=["GET"]),
     Route("/authorize", authorize, methods=["GET", "POST"]),
     Route("/token", token, methods=["POST"]),
-    # Everything else is proxied (token-protected): /mcp and any sub-path.
-    Route("/{path:path}", proxy, methods=["GET", "POST", "DELETE", "PUT", "PATCH"]),
+    # MCP endpoint (and any sub-path), OAuth-protected.
+    Route("/mcp", proxy_mcp, methods=["GET", "POST", "DELETE"]),
+    Route("/mcp/{path:path}", proxy_mcp, methods=["GET", "POST", "DELETE"]),
+    # WebDAV endpoint (and any sub-path), Basic-Auth-protected.
+    Route("/dav", proxy_dav, methods=_DAV_METHODS),
+    Route("/dav/{path:path}", proxy_dav, methods=_DAV_METHODS),
 ]
 
 app = Starlette(routes=routes, lifespan=_lifespan)

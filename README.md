@@ -1,47 +1,44 @@
 # Basic Memory Uberspace
 
 Run your own [Basic Memory](https://basicmemory.com) MCP server on
-[Uberspace 8](https://uberspace.de) and connect it to OAuth-capable AI clients
-(Claude.ai, ChatGPT Developer Mode, and any client that speaks the MCP
-authorization spec).
+[Uberspace 8](https://uberspace.de) and expose it through a single, auditable
+Python entrypoint that serves:
 
-Basic Memory's HTTP transport ships **without authentication** — it is meant to
-sit behind your own auth layer. This project provides that layer: a tiny,
-single-file **OAuth 2.1 gateway** that you put in front of Basic Memory. It
-handles the full authorization-code + PKCE flow with a fixed client ID/secret
-and a single password login, then transparently reverse-proxies authenticated
-requests (including SSE streaming) to your local Basic Memory instance.
+- **`/mcp`** — the MCP server, protected by **OAuth 2.1 + PKCE**, for AI clients
+  (Claude.ai, ChatGPT Developer Mode, …).
+- **`/dav`** — a **WebDAV** view of the same notes, protected by **Basic Auth**,
+  for editors like [Obsidian](https://obsidian.md) on macOS and iOS.
+
+Both share **one set of credentials** from a single `.env`: the OAuth client ID
+doubles as the WebDAV username, and one password covers both the OAuth login and
+WebDAV Basic Auth.
 
 ```
-Web client ── HTTPS ──> https://<user>.uber.space/mcp
-                              │
-                              ▼
-                        auth_gateway.py        ← OAuth 2.1 + PKCE, token check
-                              │  127.0.0.1
-                              ▼
-                        basic-memory           ← MCP server, streamable-http
-                          (127.0.0.1:8000)        no auth, localhost only
+                          ┌────────────────────────────────────┐
+ Claude / ChatGPT ─OAuth─▶│                                         │──▶ Basic Memory (8000)
+                          │   auth_gateway.py  (single entrypoint)   │
+ Obsidian ────────Basic───▶│   /mcp  → OAuth  → proxy                 │──▶ WsgiDAV (8002)
+                          │   /dav  → Basic  → proxy                 │      → ~/basic-memory
+                          │   /.well-known, /authorize, /token       │
+                          └────────────────────────────────────┘
 ```
+
+All three processes run as plain systemd user services. Basic Memory and WsgiDAV
+bind `127.0.0.1` (private to your Uberspace's network namespace) and are only
+reachable through the gateway, which is the sole public entrypoint.
 
 ## Why this exists
 
 - **Single user, self-hosted, no public cloud IdP.** No Google/GitHub login, no
-  Logto/Auth0, no Keycloak, no Docker. Everything runs as plain user services on
-  Uberspace.
-- **Works with browser-based AI clients.** Claude.ai and ChatGPT require OAuth
-  (a static bearer token is not enough); this gateway speaks the OAuth flow they
-  expect, using a client ID/secret you define yourself.
-- **Minimal.** One Python file, configuration via `.env`, dependencies managed
+  Logto/Auth0, no Keycloak, no Docker.
+- **Works with browser-based AI clients.** Claude.ai and ChatGPT require OAuth;
+  this gateway speaks the flow they expect with a client ID/secret you define.
+- **Works with Obsidian** (macOS + iOS) via WebDAV sync, against the very same
+  Markdown files Basic Memory uses.
+- **One auditable entrypoint.** A single Python file terminates all auth; the
+  upstreams have no auth of their own and never face the internet.
+- **Minimal.** One gateway file, configuration via `.env`, dependencies managed
   with [uv](https://docs.astral.sh/uv/).
-
-## What you get
-
-- OAuth 2.1 authorization-code flow with mandatory **PKCE (S256)**
-- Fixed, self-chosen **client ID / client secret** (no dynamic client registration)
-- A single **password login** page for the `/authorize` step
-- JWT access tokens + rotating refresh tokens
-- RFC 8414 / RFC 9728 discovery documents so clients can auto-configure
-- Token-validated **reverse proxy** to Basic Memory with SSE/streaming pass-through
 
 ---
 
@@ -61,7 +58,7 @@ to install for the Python toolchain.
 All commands run on your Uberspace shell unless noted otherwise. Replace
 `ubernaut` with your actual username everywhere.
 
-### 1. Install and initialize Basic Memory
+### 1. Install Basic Memory
 
 ```bash
 uv tool install basic-memory
@@ -75,7 +72,7 @@ Your notes live as Markdown files under `~/basic-memory` by default.
 ```bash
 git clone https://github.com/yeah/basic-memory-uberspace.git ~/auth_gateway
 cd ~/auth_gateway
-uv sync                    # installs gateway dependencies into .venv, writes uv.lock
+uv sync                    # installs all dependencies into .venv, writes uv.lock
 ```
 
 ### 3. Create your configuration
@@ -91,17 +88,18 @@ openssl rand -hex 32       # use for CLIENT_SECRET
 openssl rand -hex 32       # use for JWT_SECRET
 ```
 
-Edit `.env` and set:
+Edit `.env` and set at least:
 
 ```ini
 BASE_URL=https://ubernaut.uber.space
-PORT=8001
-UPSTREAM_URL=http://127.0.0.1:8000
 CLIENT_ID=basic-memory
 CLIENT_SECRET=<first openssl value>
 JWT_SECRET=<second openssl value>
 LOGIN_PASSWORD=<a password you choose>
 ```
+
+`LOGIN_PASSWORD` is used both for the OAuth browser login and as the WebDAV
+password. The WebDAV username defaults to `CLIENT_ID`.
 
 Protect the file (it contains secrets):
 
@@ -113,28 +111,40 @@ chmod 600 .env
 > without the `/mcp` suffix. If it is wrong, the OAuth discovery breaks for
 > browser clients.
 
-### 4. Create the two services
+### 4. Point WsgiDAV at your notes
 
-Uberspace 8 uses systemd user services. We run **two**: Basic Memory and the
-gateway.
+Edit `wsgidav.yaml` and set the `provider_mapping` to the absolute path of your
+notes (WsgiDAV does not expand `~`):
 
-**Basic Memory** — bound to `127.0.0.1`, reachable only by the gateway:
+```yaml
+provider_mapping:
+  "/dav": "/home/ubernaut/basic-memory"
+```
+
+Leave `simple_dc` on anonymous access — the gateway is the gatekeeper, WsgiDAV
+only ever listens on `127.0.0.1`.
+
+### 5. Create the three services
+
+Uberspace 8 uses systemd user services. We run **three**, all started with
+`--workdir` so uv finds the project and the gateway finds `.env`.
+
+**Basic Memory** — MCP server on `127.0.0.1:8000`:
 
 ```bash
 uberspace service add basicmemory \
   "$HOME/.local/bin/basic-memory mcp --transport streamable-http --host 127.0.0.1 --port 8000"
 ```
 
-> Each Uberspace lives in its own network namespace with its own loopback
-> interface, so `127.0.0.1` here is private to your account — other users on the
-> same host cannot reach it. Binding Basic Memory to `127.0.0.1` keeps it
-> reachable only through the gateway. (The gateway itself must bind `0.0.0.0`,
-> see below, because that is what the web backend connects to.)
+**WsgiDAV** — WebDAV server on `127.0.0.1:8002`:
 
-**The gateway** — runs via uv, binds `0.0.0.0` (required for the web backend).
-The `--workdir` is essential: uv needs it to find `pyproject.toml`/`.venv`, and
-the gateway needs it to find `.env`. Without it the service fails with
-`ModuleNotFoundError`.
+```bash
+uberspace service add wsgidav \
+  "/usr/bin/uv run wsgidav --config wsgidav.yaml" \
+  --workdir "$HOME/auth_gateway"
+```
+
+**The gateway** — the single public entrypoint, binds `0.0.0.0:8001`:
 
 ```bash
 uberspace service add auth_gateway \
@@ -142,57 +152,85 @@ uberspace service add auth_gateway \
   --workdir "$HOME/auth_gateway"
 ```
 
-Check both services are running:
+> The gateway must bind `0.0.0.0` because that is what the web backend connects
+> to. Basic Memory and WsgiDAV stay on `127.0.0.1`: each Uberspace lives in its
+> own network namespace with its own loopback, so `127.0.0.1` is private to your
+> account and unreachable by other users on the host.
+
+Check all three:
 
 ```bash
-systemctl --user status auth_gateway --no-pager   # should be active (running)
-systemctl --user status basicmemory --no-pager    # should be active (running)
+systemctl --user status auth_gateway --no-pager
+systemctl --user status basicmemory  --no-pager
+systemctl --user status wsgidav      --no-pager
 ```
 
 If the gateway logs `ModuleNotFoundError` or `WARNING: ... is not set`, the
 working directory is wrong — verify `--workdir` points at the cloned repo and
 that `.env` exists there.
 
-### 5. Wire up the web backend
+### 6. Wire up the web backends
 
-Route **all** traffic on `/` to the gateway. The gateway itself forwards `/mcp`
-to Basic Memory after checking the token. Do **not** add a separate `/mcp`
-backend pointing at port 8000 — that would bypass authentication.
+Map only the specific gateway paths, so `/` stays free for other uses. The
+gateway forwards `/mcp` to Basic Memory and `/dav` to WsgiDAV after checking
+auth; never point a backend straight at port 8000 or 8002.
 
 ```bash
-uberspace web backend del /          # remove the default Apache backend first
-uberspace web backend add / port 8001
+uberspace web backend del /          # remove the default Apache backend on these paths if present
+uberspace web backend add /mcp port 8001
+uberspace web backend add /dav port 8001
+uberspace web backend add /authorize port 8001
+uberspace web backend add /token port 8001
+uberspace web backend add /.well-known/oauth-protected-resource port 8001
+uberspace web backend add /.well-known/oauth-authorization-server port 8001
 uberspace web backend list
 ```
 
-> The list should show only `/ → 8001`.
+> `/` itself is no longer routed to the gateway, leaving it available for
+> anything else you host on this Uberspace.
 
 ---
 
 ## Connecting clients
 
-### Claude.ai
+### Claude.ai (MCP over OAuth)
 
 1. Settings → Connectors → **Add custom connector**
 2. **URL:** `https://ubernaut.uber.space/mcp`
 3. **Advanced settings:**
-   - **OAuth Client ID:** the `CLIENT_ID` from your `.env` (e.g. `basic-memory`)
-   - **OAuth Client Secret:** the `CLIENT_SECRET` from your `.env`
-4. **Connect** → your login page opens in the browser → enter `LOGIN_PASSWORD`.
+   - **OAuth Client ID:** your `CLIENT_ID` (e.g. `basic-memory`)
+   - **OAuth Client Secret:** your `CLIENT_SECRET`
+4. **Connect** → the login page opens in the browser → enter `LOGIN_PASSWORD`.
 5. Enable the connector in a chat and try: *"search my notes about …"*
 
 ### ChatGPT (Developer Mode)
 
-Settings → Apps & Connectors → Advanced → enable **Developer Mode**, then create
-a connector pointing at the same URL with the same client ID/secret. ChatGPT is
-stricter about discovery and may expect refresh handling; this gateway issues
-refresh tokens, so it should complete the flow.
+Settings → Apps & Connectors → Advanced → enable **Developer Mode**, then add a
+connector pointing at the same URL with the same client ID/secret. The gateway
+issues refresh tokens, so the flow completes.
 
-### Other clients
+### Obsidian (WebDAV sync, macOS + iOS)
 
-Clients that accept a static bearer token (e.g. Mistral Le Chat, Gemini CLI,
-Cursor) can also use the gateway — point them at `https://ubernaut.uber.space/mcp`
-and let them run the OAuth flow, or supply a token issued by the gateway.
+Obsidian works on a local vault and syncs it to the WebDAV endpoint with a
+community plugin. Use [Obsidian WebDAV Sync](https://github.com/hesprs/obsidian-webdav-sync)
+by hesprs (an actively maintained alternative to the unmaintained Remotely Save).
+
+On **each** device (macOS and iOS):
+
+1. Community plugins → turn off Restricted Mode → Browse → install **WebDAV Sync**
+   (hesprs) → enable it.
+2. Plugin settings:
+   - **Server address:** `https://ubernaut.uber.space/dav`
+   - **Username:** your `CLIENT_ID` (e.g. `basic-memory`)
+   - **Password:** your `LOGIN_PASSWORD`
+3. **Exclude `.obsidian` from sync** in the plugin's ignore settings. It holds
+   per-device Obsidian config that should not travel between devices and is not
+   part of your Basic Memory notes.
+
+**Two-writer note:** Basic Memory and Obsidian both write into `~/basic-memory`.
+The plugin's three-way merge handles this well, but to be safe start with manual
+or on-startup sync (not real-time) and avoid editing the same file in Obsidian
+while Basic Memory is actively writing it.
 
 ---
 
@@ -203,10 +241,12 @@ and let them run the OAuth flow, or supply a token issued by the gateway.
 | `BASE_URL`          | yes      | `https://ubernaut.uber.space` | Public URL of the gateway, without `/mcp`. Sets the OAuth issuer and token audience. |
 | `PORT`              | no       | `8001`                      | Port the gateway listens on. |
 | `UPSTREAM_URL`      | no       | `http://127.0.0.1:8000`     | Local Basic Memory MCP server. |
-| `CLIENT_ID`         | yes      | `basic-memory`              | Fixed OAuth client ID. |
+| `DAV_UPSTREAM_URL`  | no       | `http://127.0.0.1:8002`     | Local WsgiDAV WebDAV server. |
+| `CLIENT_ID`         | yes      | `basic-memory`              | Fixed OAuth client ID; also the WebDAV username. |
 | `CLIENT_SECRET`     | yes      | —                           | Fixed OAuth client secret. |
 | `JWT_SECRET`        | yes      | —                           | Signing key for access tokens. Keep stable. |
-| `LOGIN_PASSWORD`    | yes      | —                           | Password for the `/authorize` login page. |
+| `LOGIN_PASSWORD`    | yes      | —                           | Password for both OAuth login and WebDAV Basic Auth. |
+| `WEBDAV_USERNAME`   | no       | value of `CLIENT_ID`        | Override the WebDAV username if you want it to differ from the OAuth client ID. |
 | `ACCESS_TOKEN_TTL`  | no       | `3600`                      | Access-token lifetime (seconds). |
 | `REFRESH_TOKEN_TTL` | no       | `2592000`                   | Refresh-token lifetime (seconds). |
 | `AUTH_CODE_TTL`     | no       | `300`                       | Authorization-code lifetime (seconds). |
@@ -220,22 +260,21 @@ and let them run the OAuth flow, or supply a token issued by the gateway.
 - **Restarts and re-login:** access tokens are verified purely via `JWT_SECRET`,
   so they survive a gateway restart. Refresh tokens are kept in memory and are
   lost on restart — clients re-authenticate the next time a refresh is needed.
-  For a single user this is usually fine. To avoid it entirely, persist refresh
-  tokens (e.g. in SQLite); not implemented here to keep the gateway minimal.
 - **Forcing a fresh OAuth flow** (e.g. for testing): change `JWT_SECRET` and
   restart, or remove and re-add the connector in the client.
-- **Logs:** `journalctl --user -u auth_gateway -n 50 --no-pager`
+- **Logs:** `journalctl --user -u auth_gateway -n 50 --no-pager` (likewise for
+  `basicmemory` and `wsgidav`).
 
 ## Security notes
 
-- This is a **single-user** design. The `/authorize` page is protected by one
-  password; there is no user management.
-- Basic Memory is bound to `127.0.0.1` inside your Uberspace's private network
-  namespace and is never reachable from the internet directly. All external
-  traffic goes through the gateway, which terminates over HTTPS via Uberspace's
-  web backend.
-- The gateway implements its own OAuth endpoints. Review the code before relying
-  on it for anything beyond personal use.
+- This is a **single-user** design. There is no user management; one password
+  guards both the OAuth login and WebDAV.
+- The gateway is the only public entrypoint. Basic Memory and WsgiDAV bind
+  `127.0.0.1` inside your Uberspace's private network namespace and are never
+  reachable from the internet directly. All external traffic is HTTPS-terminated
+  by Uberspace's web backend in front of the gateway.
+- The gateway implements its own OAuth and Basic Auth. Review the code before
+  relying on it for anything beyond personal use.
 
 ## License
 

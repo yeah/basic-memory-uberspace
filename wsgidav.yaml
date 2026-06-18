@@ -1,0 +1,42 @@
+# wsgidav.yaml - WebDAV server exposing the Basic Memory notes directory.
+#
+# In the final setup this runs on 127.0.0.1 only and sits BEHIND auth_gateway,
+# which enforces Basic Auth itself. WsgiDAV's own auth is therefore set to
+# anonymous (the gateway is the gatekeeper). For standalone local testing you
+# can flip simple_dc to require a user (see the commented block).
+
+host: 127.0.0.1
+port: 8002
+
+# Serve the Basic Memory notes at /dav. Use an ABSOLUTE path (WsgiDAV does not
+# expand ~). Point this at your Basic Memory notes directory.
+provider_mapping:
+  "/dav": "/home/ubernaut/basic-memory"
+
+# Behind the gateway: no auth here, the gateway already authenticated the user.
+# WsgiDAV still needs a domain controller; allow anonymous.
+simple_dc:
+  user_mapping:
+    "*": true   # anonymous access allowed (gateway enforces auth upstream)
+
+# --- For STANDALONE local testing only, comment the block above and use this
+# --- instead to require Basic Auth directly against WsgiDAV:
+# simple_dc:
+#   user_mapping:
+#     "*":
+#       "testuser":
+#         password: "testpass"
+#         roles: ["editor"]
+
+# Property/lock behaviour: keep it simple and writable.
+property_manager: true
+lock_storage: true
+
+# Directory browsing in a browser (handy while testing; harmless behind gateway).
+dir_browser:
+  enable: true
+
+# Logging
+verbose: 3
+logging:
+  enable_loggers: []
