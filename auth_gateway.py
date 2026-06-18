@@ -18,6 +18,7 @@ See .env.example for all available keys.
 
 import base64
 import hashlib
+import html
 import os
 import secrets
 import time
@@ -93,6 +94,12 @@ _HOP_BY_HOP = {
 
 
 # --- Helpers ------------------------------------------------------------------
+
+def _esc(value: str) -> str:
+    """HTML-escape a value for safe interpolation into the login page,
+    including quotes so it is safe inside HTML attributes."""
+    return html.escape(value, quote=True)
+
 
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
@@ -205,30 +212,30 @@ async def authorize(request):
             )
         if not p.get("code_challenge") or not p.get("redirect_uri"):
             return JSONResponse({"error": "invalid_request"}, status_code=400)
-        html = _LOGIN_FORM.format(
-            error="",
-            logo_uri=LOGO_URI,
-            client_id=p.get("client_id", ""),
-            redirect_uri=p.get("redirect_uri", ""),
-            state=p.get("state", ""),
-            code_challenge=p.get("code_challenge", ""),
-            scope=p.get("scope", "mcp"),
+        html_page = _LOGIN_FORM.format(
+            error="",  # server-controlled HTML, must NOT be escaped
+            logo_uri=_esc(LOGO_URI),
+            client_id=_esc(p.get("client_id", "")),
+            redirect_uri=_esc(p.get("redirect_uri", "")),
+            state=_esc(p.get("state", "")),
+            code_challenge=_esc(p.get("code_challenge", "")),
+            scope=_esc(p.get("scope", "mcp")),
         )
-        return HTMLResponse(html)
+        return HTMLResponse(html_page)
 
     # POST: verify login
     form = await request.form()
     if not secrets.compare_digest(form.get("password", ""), LOGIN_PASSWORD):
-        html = _LOGIN_FORM.format(
-            error='<p style="color:#c00">Wrong password</p>',
-            logo_uri=LOGO_URI,
-            client_id=form.get("client_id", ""),
-            redirect_uri=form.get("redirect_uri", ""),
-            state=form.get("state", ""),
-            code_challenge=form.get("code_challenge", ""),
-            scope=form.get("scope", "mcp"),
+        html_page = _LOGIN_FORM.format(
+            error='<p style="color:#c00">Wrong password</p>',  # server-controlled
+            logo_uri=_esc(LOGO_URI),
+            client_id=_esc(form.get("client_id", "")),
+            redirect_uri=_esc(form.get("redirect_uri", "")),
+            state=_esc(form.get("state", "")),
+            code_challenge=_esc(form.get("code_challenge", "")),
+            scope=_esc(form.get("scope", "mcp")),
         )
-        return HTMLResponse(html, status_code=401)
+        return HTMLResponse(html_page, status_code=401)
 
     # Issue authorization code
     code = secrets.token_urlsafe(32)
