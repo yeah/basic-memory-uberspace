@@ -47,6 +47,13 @@ BASE_URL = os.environ.get("BASE_URL", "https://ubernaut.uber.space").rstrip("/")
 RESOURCE_URL = f"{BASE_URL}/mcp"
 SCOPES = ["mcp"]
 
+# Basic Memory logo, referenced directly from basicmemory.com (not downloaded
+# or re-hosted). Shown on the login page and advertised in resource metadata.
+LOGO_URI = os.environ.get(
+    "LOGO_URI",
+    "https://basicmemory.com/images/basic-memory/disk-logo-black.svg",
+)
+
 PORT = int(os.environ.get("PORT", "8001"))
 CLIENT_ID = os.environ.get("CLIENT_ID", "basic-memory")
 CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "")
@@ -133,6 +140,10 @@ def _verify_access_token(req_headers) -> bool:
 async def protected_resource_metadata(request):
     return JSONResponse({
         "resource": RESOURCE_URL,
+        "resource_name": "Basic Memory",
+        # Referenced from basicmemory.com (not self-hosted). Optional field
+        # some clients display next to the connector.
+        "logo_uri": LOGO_URI,
         "authorization_servers": [BASE_URL],
         "scopes_supported": SCOPES,
         "bearer_methods_supported": ["header"],
@@ -159,10 +170,14 @@ async def authorization_server_metadata(request):
 
 _LOGIN_FORM = """
 <!doctype html><html><head><meta charset="utf-8"><title>MCP Login</title>
-<style>body{{font-family:sans-serif;max-width:380px;margin:80px auto;padding:0 16px}}
+<style>body{{font-family:sans-serif;max-width:380px;margin:80px auto;padding:0 16px;text-align:center}}
+img.logo{{width:64px;height:64px;margin-bottom:8px}}
+form{{text-align:left}}
 input{{width:100%;padding:10px;margin:8px 0;box-sizing:border-box}}
 button{{padding:10px 16px;cursor:pointer}}</style></head>
-<body><h2>Basic Memory - Login</h2>
+<body>
+<img class="logo" src="{logo_uri}" alt="Basic Memory">
+<h2>Basic Memory - Login</h2>
 {error}
 <form method="post">
   <input type="hidden" name="client_id" value="{client_id}">
@@ -191,6 +206,7 @@ async def authorize(request):
             return JSONResponse({"error": "invalid_request"}, status_code=400)
         html = _LOGIN_FORM.format(
             error="",
+            logo_uri=LOGO_URI,
             client_id=p.get("client_id", ""),
             redirect_uri=p.get("redirect_uri", ""),
             state=p.get("state", ""),
@@ -204,6 +220,7 @@ async def authorize(request):
     if not secrets.compare_digest(form.get("password", ""), LOGIN_PASSWORD):
         html = _LOGIN_FORM.format(
             error='<p style="color:#c00">Wrong password</p>',
+            logo_uri=LOGO_URI,
             client_id=form.get("client_id", ""),
             redirect_uri=form.get("redirect_uri", ""),
             state=form.get("state", ""),
