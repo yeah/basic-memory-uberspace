@@ -62,6 +62,17 @@ CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "")
 JWT_SECRET = os.environ.get("JWT_SECRET", "")
 LOGIN_PASSWORD = os.environ.get("LOGIN_PASSWORD", "")
 
+# Exact-match allowlist of OAuth redirect URIs (comma-separated in .env).
+# The authorization code is only ever handed to a URI in this list, which
+# stops an attacker from driving the flow to their own callback. Empty means
+# nothing is allowed (fail closed); a rejected URI is logged so you can copy
+# the exact value your client uses into ALLOWED_REDIRECT_URIS.
+ALLOWED_REDIRECT_URIS = [
+    _u.strip()
+    for _u in os.environ.get("ALLOWED_REDIRECT_URIS", "").split(",")
+    if _u.strip()
+]
+
 # Upstream Basic Memory MCP server (local, no auth of its own).
 UPSTREAM_URL = os.environ.get("UPSTREAM_URL", "http://127.0.0.1:8000").rstrip("/")
 
@@ -99,6 +110,21 @@ def _esc(value: str) -> str:
     """HTML-escape a value for safe interpolation into the login page,
     including quotes so it is safe inside HTML attributes."""
     return html.escape(value, quote=True)
+
+
+def _redirect_uri_ok(uri: str) -> bool:
+    """True if uri is in the configured allowlist (exact match).
+
+    Logs rejected values so the operator can discover the exact redirect_uri
+    their client uses and add it to ALLOWED_REDIRECT_URIS.
+    """
+    if uri in ALLOWED_REDIRECT_URIS:
+        return True
+    print(
+        "rejected redirect_uri (add to ALLOWED_REDIRECT_URIS if you trust it): "
+        + repr(uri)
+    )
+    return False
 
 
 def _b64url(data: bytes) -> str:
@@ -212,6 +238,12 @@ async def authorize(request):
             )
         if not p.get("code_challenge") or not p.get("redirect_uri"):
             return JSONResponse({"error": "invalid_request"}, status_code=400)
+        if not _redirect_uri_ok(p.get("redirect_uri", "")):
+            return JSONResponse(
+                {"error": "invalid_request",
+                 "error_description": "redirect_uri not allowed"},
+                status_code=400,
+            )
         html_page = _LOGIN_FORM.format(
             error="",  # server-controlled HTML, must NOT be escaped
             logo_uri=_esc(LOGO_URI),
@@ -225,6 +257,12 @@ async def authorize(request):
 
     # POST: verify login
     form = await request.form()
+    if not _redirect_uri_ok(form.get("redirect_uri", "")):
+        return JSONResponse(
+            {"error": "invalid_request",
+             "error_description": "redirect_uri not allowed"},
+            status_code=400,
+        )
     if not secrets.compare_digest(form.get("password", ""), LOGIN_PASSWORD):
         html_page = _LOGIN_FORM.format(
             error='<p style="color:#c00">Wrong password</p>',  # server-controlled

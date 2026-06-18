@@ -14,7 +14,7 @@ doubles as the WebDAV username, and one password covers both the OAuth login and
 WebDAV Basic Auth.
 
 ```
-                          ┌────────────────────────────────────┐
+                          ┌─────────────────────────────────────────┐
 Claude / ChatGPT ─OAuth──▶│                                         │──▶ Basic Memory (8000)
                           │   auth_gateway.py  (single entrypoint)   │
 Obsidian ────────Basic───▶│   /mcp  → OAuth  → proxy                 │──▶ WsgiDAV (8002)
@@ -92,10 +92,22 @@ CLIENT_ID=basic-memory
 CLIENT_SECRET=<first openssl value>
 JWT_SECRET=<second openssl value>
 LOGIN_PASSWORD=<a password you choose>
+ALLOWED_REDIRECT_URIS=https://claude.ai/api/mcp/auth_callback
 ```
 
 `LOGIN_PASSWORD` is used both for the OAuth browser login and as the WebDAV
 password. The WebDAV username defaults to `CLIENT_ID`.
+
+`ALLOWED_REDIRECT_URIS` is the exact-match allowlist of OAuth callback URLs the
+authorization code may be sent to. It is **required** — if empty, every
+`/authorize` is rejected. The value above is the Claude.ai connector callback;
+if your client uses a different one, the gateway logs the exact rejected
+`redirect_uri` (`journalctl --user -u auth_gateway`) so you can copy it in.
+Separate multiple URLs with commas.
+
+The gateway also **refuses to start** if `CLIENT_SECRET`, `JWT_SECRET` or
+`LOGIN_PASSWORD` is empty, so a misconfigured deployment fails loudly instead
+of running with no effective authentication.
 
 Protect the file (it contains secrets):
 
@@ -162,9 +174,9 @@ systemctl --user status basicmemory  --no-pager
 systemctl --user status wsgidav      --no-pager
 ```
 
-If the gateway logs `ModuleNotFoundError` or `WARNING: ... is not set`, the
-working directory is wrong — verify `--workdir` points at the cloned repo and
-that `.env` exists there.
+If the gateway refuses to start with "missing required secret(s)", fill those
+in in `.env`. If it logs `ModuleNotFoundError`, the working directory is wrong —
+verify `--workdir` points at the cloned repo and that `.env` exists there.
 
 ### 5. Wire up the web backends
 
@@ -250,8 +262,8 @@ while Basic Memory is actively writing it.
 | `CLIENT_SECRET`     | yes      | —                           | Fixed OAuth client secret. |
 | `JWT_SECRET`        | yes      | —                           | Signing key for access tokens. Keep stable. |
 | `LOGIN_PASSWORD`    | yes      | —                           | Password for both OAuth login and WebDAV Basic Auth. |
+| `ALLOWED_REDIRECT_URIS` | yes  | —                           | Comma-separated exact-match allowlist of OAuth redirect URIs. Empty rejects every `/authorize`. Rejected URIs are logged so you can copy the exact value your client uses. |
 | `WEBDAV_USERNAME`   | no       | value of `CLIENT_ID`        | Override the WebDAV username if you want it to differ from the OAuth client ID. |
-| `LOGO_URI`          | no       | Basic Memory logo on basicmemory.com | Logo shown on the login page, in resource metadata, and as the /favicon.ico redirect target. |
 | `ACCESS_TOKEN_TTL`  | no       | `3600`                      | Access-token lifetime (seconds). |
 | `REFRESH_TOKEN_TTL` | no       | `2592000`                   | Refresh-token lifetime (seconds). |
 | `AUTH_CODE_TTL`     | no       | `300`                       | Authorization-code lifetime (seconds). |
