@@ -160,12 +160,12 @@ to Basic Memory after checking the token. Do **not** add a separate `/mcp`
 backend pointing at port 8000 — that would bypass authentication.
 
 ```bash
+uberspace web backend del /          # remove the default Apache backend first
 uberspace web backend add / port 8001
 uberspace web backend list
 ```
 
-> If `/` already has a backend, append `--force`. The list should show only
-> `/ → 8001`.
+> The list should show only `/ → 8001`.
 
 ---
 
