@@ -1,0 +1,6 @@
+# Caddy terminates TLS (automatic Let's Encrypt certificate for $DOMAIN) and
+# reverse-proxies everything to the gateway, which is the single entrypoint and
+# enforces all auth. DOMAIN is provided via the environment (see .env).
+{$DOMAIN} {
+	reverse_proxy gateway:8001
+}

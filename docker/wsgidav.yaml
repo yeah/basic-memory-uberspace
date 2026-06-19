@@ -1,0 +1,29 @@
+# wsgidav.yaml for the Docker deployment.
+#
+# Listens on 0.0.0.0 inside the container (reachable only by the gateway over
+# the internal compose network, never published to the host). Serves the Basic
+# Memory notes directory, which lives on the shared `notes` volume at
+# /data/basic-memory (Basic Memory runs with HOME=/data, so its default project
+# is $HOME/basic-memory).
+
+host: 0.0.0.0
+port: 8002
+
+provider_mapping:
+  "/dav": "/data/basic-memory"
+
+# No auth here: the gateway already authenticated the request (Basic Auth) and
+# is the only thing that can reach this port.
+simple_dc:
+  user_mapping:
+    "*": true   # anonymous access allowed (gateway enforces auth upstream)
+
+property_manager: true
+lock_storage: true
+
+dir_browser:
+  enable: true
+
+verbose: 1
+logging:
+  enable_loggers: []

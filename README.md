@@ -27,10 +27,14 @@ All three processes run as plain systemd user services. Basic Memory and WsgiDAV
 bind `127.0.0.1` (private to your Uberspace's network namespace) and are only
 reachable through the gateway, which is the sole public entrypoint.
 
+> **Not on Uberspace?** See [DOCKER.md](DOCKER.md) for a self-contained Docker
+> Compose deployment of the same stack, with automatic HTTPS via Caddy.
+
 ## Why this exists
 
 - **Single user, self-hosted, no public cloud IdP.** No Google/GitHub login, no
-  Logto/Auth0, no Keycloak, no Docker.
+  Logto/Auth0, no Keycloak, no Docker required (a Compose option exists for
+  non-Uberspace hosts, but the Uberspace path needs none).
 - **Works with browser-based AI clients.** Claude.ai and ChatGPT require OAuth;
   this gateway speaks the flow they expect with a client ID/secret you define.
 - **Works with Obsidian** (macOS + iOS) via WebDAV sync, against the very same
