@@ -3,7 +3,7 @@
 # them; each compose service merely runs a different command.
 FROM python:3.12-slim
 
-# uv for fast, locked dependency installation.
+# uv for fast dependency installation.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 # gosu lets the entrypoint fix volume ownership as root and then drop to an
@@ -20,10 +20,12 @@ ENV HOME=/home/app \
 
 WORKDIR /app
 
-# Install dependencies first, for better layer caching. Uses the committed
-# lockfile so the image is reproducible.
-COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev
+# Install dependencies first, for better layer caching. uv.lock is optional:
+# the trailing * tolerates its absence (pyproject.toml still matches, so COPY
+# succeeds). With a committed lockfile present, uv uses it; without one, uv
+# resolves from pyproject.toml. Drop --frozen so a missing/stale lock is fine.
+COPY pyproject.toml uv.lock* ./
+RUN uv sync --no-dev
 
 # Application code and the container WsgiDAV config.
 COPY auth_gateway.py ./
