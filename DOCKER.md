@@ -1,9 +1,9 @@
-# Running with Docker Compose
+# Docker Compose deployment
 
-A self-contained deployment for when you are **not** on Uberspace. It runs the
-same three processes as containers behind [Caddy](https://caddyserver.com),
-which terminates TLS with an automatic Let's Encrypt certificate — so the
-OAuth-capable clients (which require public HTTPS) work out of the box.
+A self-contained deployment that runs the three processes as containers behind
+[Caddy](https://caddyserver.com), which terminates TLS with an automatic Let's
+Encrypt certificate — so the OAuth-capable clients (which require public HTTPS)
+work out of the box.
 
 ```
   Internet ──443──▶ caddy  (TLS, Let's Encrypt)
@@ -23,6 +23,9 @@ same `uv` dependency set); each service just runs a different command. Only
 Caddy publishes ports. Basic Memory and WsgiDAV sit on an `internal` network
 with no internet access and are reachable only through the gateway.
 
+For connecting clients and the full configuration reference, see the
+[main README](README.md#connecting-clients).
+
 ## Requirements
 
 - Docker Engine with the Compose plugin (`docker compose`).
@@ -32,9 +35,9 @@ with no internet access and are reachable only through the gateway.
 
 ## Setup
 
-From the repository root:
-
 ```bash
+git clone https://github.com/yeah/basic-memory-oauth-server.git
+cd basic-memory-oauth-server
 cp .env.docker.example .env
 openssl rand -hex 32        # CLIENT_SECRET
 openssl rand -hex 32        # JWT_SECRET
@@ -107,15 +110,15 @@ your proxy terminate TLS:
    ```
 3. Point your proxy at `http://127.0.0.1:8001`.
 
-`BASE_URL` must still be the **public HTTPS URL** your proxy serves, and that
-host must be covered by `ALLOWED_REDIRECT_HOSTS` only for the *client* callback
-hosts — your own domain does not need to be listed there.
+`BASE_URL` must still be the **public HTTPS URL** your proxy serves. Only the
+*client* callback hosts need to be in `ALLOWED_REDIRECT_HOSTS` — your own domain
+does not need to be listed there.
 
 ## Notes
 
-- **Single user.** One password guards both OAuth and WebDAV; the same
-  security model and brute-force throttle as the Uberspace setup apply (see the
-  main README's security notes).
+- **Single user.** One password guards both OAuth and WebDAV; the same security
+  model and brute-force throttle as the user-services setup apply (see the
+  [main README's security notes](README.md#security-notes)).
 - **Non-root.** The containers fix volume ownership and then drop to an
   unprivileged user via `gosu`.
 - **No internet for the data services.** `basicmemory` and `wsgidav` are on an
