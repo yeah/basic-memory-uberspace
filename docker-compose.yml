@@ -60,8 +60,6 @@ services:
     image: basic-memory-stack:latest
     pull_policy: never
     restart: unless-stopped
-    environment:
-      HOME: /data            # default project -> /data/basic-memory, DB -> /data/.basic-memory
     command:
       - basic-memory
       - mcp
@@ -72,7 +70,7 @@ services:
       - --port
       - "8000"
     volumes:
-      - notes:/data
+      - notes:/home/app
     healthcheck:
       test:
         - CMD
@@ -94,7 +92,7 @@ services:
       - --config
       - /app/docker/wsgidav.yaml
     volumes:
-      - notes:/data
+      - notes:/home/app
     healthcheck:
       test:
         - CMD

@@ -10,7 +10,7 @@ host: 0.0.0.0
 port: 8002
 
 provider_mapping:
-  "/dav": "/data/basic-memory"
+  "/dav": "/home/app/basic-memory"
 
 # No auth here: the gateway already authenticated the request (Basic Auth) and
 # is the only thing that can reach this port.
